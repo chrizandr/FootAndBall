@@ -10,10 +10,19 @@ import torch
 import cv2
 import os
 import argparse
+import pdb
 
 import network.footandball as footandball
 import data.augmentation as augmentations
 from data.augmentation import PLAYER_LABEL, BALL_LABEL
+
+import sys
+from tqdm import tqdm
+import numpy as np
+
+sys.path.insert(1, '/home/chrizandr')
+
+from yolov3.annotations.annot.annot_utils import CVAT_Track, CVAT_annotation
 
 
 def draw_bboxes(image, detections):
@@ -55,34 +64,31 @@ def run_detector(model, args):
     # Set model to evaluation mode
     model.eval()
 
-    sequence = cv2.VideoCapture(args.path)
-    fps = sequence.get(cv2.CAP_PROP_FPS)
-    (frame_width, frame_height) = (int(sequence.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                                   int(sequence.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-
-    out_sequence = cv2.VideoWriter(args.out_video, cv2.VideoWriter_fourcc(*'XVID'), fps,
-                                   (frame_width, frame_height))
-
     print('Processing video: {}'.format(args.path))
-    while sequence.isOpened():
-        ret, frame = sequence.read()
-        if not ret:
-            # End of video
-            break
 
-        # Convert color space from BGR to RGB, convert to tensor and normalize
-        img_tensor = augmentations.numpy2tensor(frame)
+    images = os.listdir(args.path)
+    annotation = CVAT_annotation()
 
+    for img in tqdm(images):
+        frame_img = cv2.imread(os.path.join(args.path, img))
+        frame = int(img.strip("image").strip(".jpg"))
+        img_tensor = augmentations.numpy2tensor(frame_img)
+
+        track = CVAT_Track(frame)
         with torch.no_grad():
             # Add dimension for the batch size
             img_tensor = img_tensor.unsqueeze(dim=0).to(args.device)
             detections = model(img_tensor)[0]
+        # if len(detections['boxes']) > 10:
+        #     pdb.set_trace()
+        for det, label, conf in zip(detections['boxes'].cpu(), detections['labels'].cpu(), detections['scores'].cpu()):
+            xtl, ytl, xbr, ybr = np.array(det)
+            if label.item() == 2 and conf.item() > 0.5:
+                track.create_bbox(frame-1, xtl, ytl, xbr, ybr, conf=conf.item())
+        if len(track.bboxes) != 0:
+            annotation.insert_track(track)
 
-        frame = draw_bboxes(frame, detections)
-        out_sequence.write(frame)
-
-    sequence.release()
-    out_sequence.release()
+    annotation.build(args.annot, add_conf=True)
 
 
 if __name__ == '__main__':
@@ -91,11 +97,12 @@ if __name__ == '__main__':
     # Train the DeepBall ball detector model
     parser = argparse.ArgumentParser()
     parser.add_argument('--path', help='path to video', type=str, required=True)
+    parser.add_argument('--annot', help='path to video', type=str, required=True)
     parser.add_argument('--model', help='model name', type=str, default='fb1')
     parser.add_argument('--weights', help='path to model weights', type=str, required=True)
     parser.add_argument('--ball_threshold', help='ball confidence detection threshold', type=float, default=0.7)
     parser.add_argument('--player_threshold', help='player confidence detection threshold', type=float, default=0.7)
-    parser.add_argument('--out_video', help='path to video with detection results', type=str, required=True,
+    parser.add_argument('--out_video', help='path to video with detection results', type=str, required=False,
                         default=None)
     parser.add_argument('--device', help='device (CPU or CUDA)', type=str, default='cuda:0')
     args = parser.parse_args()
@@ -118,3 +125,4 @@ if __name__ == '__main__':
 
     run_detector(model, args)
 
+# python run_detector.py --path /ssd_scratch/cvit/chrizandr/images --weights models/model_20201019_1416_final.pth --annot frvscr_fnb.xml --device cuda
